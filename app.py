@@ -10,7 +10,18 @@ import pandas as pd
 import streamlit as st
 from PIL import Image
 
-import cv2
+# =========================
+# SAFE IMPORT OPENCV
+# =========================
+try:
+    import cv2  # noqa
+    CV2_OK = True
+    CV2_ERR = ""
+except Exception as e:
+    cv2 = None
+    CV2_OK = False
+    CV2_ERR = str(e)
+
 from ultralytics import YOLO
 
 
@@ -20,8 +31,23 @@ from ultralytics import YOLO
 st.set_page_config(page_title="Budiyolo Dashboard", layout="wide")
 
 APP_TITLE = "🧠 Budiyolo — Items Ownership Detector"
-APP_SUB = "Foto • Batch • Video • Webcam (OpenCV) • Checklist Ketersediaan • Log & Export"
+APP_SUB = "Foto • Batch • Video • Kamera Browser (st.camera_input) • Checklist Ketersediaan • Log & Export"
 DEFAULT_WEIGHTS = "weights/best_items.pt"
+
+
+# =========================
+# FAIL FAST (OPEN CV REQUIRED FOR PLOTTING)
+# =========================
+if not CV2_OK:
+    st.error("OpenCV (cv2) gagal di-import di environment ini.")
+    st.code(CV2_ERR)
+    st.info(
+        "Perbaikan Cloud (umum):\n"
+        "1) requirements.txt pakai opencv-python-headless (hapus opencv-python / opencv-contrib-python)\n"
+        "2) Tambah packages.txt (libgl1, libglib2.0-0, ffmpeg, dll)\n"
+        "3) Set Python version dari UI Streamlit (disarankan 3.11/3.12)"
+    )
+    st.stop()
 
 
 # =========================
@@ -30,13 +56,9 @@ DEFAULT_WEIGHTS = "weights/best_items.pt"
 if "log_rows" not in st.session_state:
     st.session_state["log_rows"] = []
 
-# label -> {"image":0,"video":0,"webcam":0}
+# label -> {"image":0,"video":0,"camera":0}
 if "avail_counts" not in st.session_state:
     st.session_state["avail_counts"] = {}
-
-# webcam run flag
-if "cam_run" not in st.session_state:
-    st.session_state["cam_run"] = False
 
 
 # =========================
@@ -77,13 +99,12 @@ def ensure_dir(path_str: str):
 def init_availability(all_labels: List[str]):
     for lb in all_labels:
         if lb not in st.session_state["avail_counts"]:
-            st.session_state["avail_counts"][lb] = {"image": 0, "video": 0, "webcam": 0}
+            st.session_state["avail_counts"][lb] = {"image": 0, "video": 0, "camera": 0}
 
 
 def reset_all(all_labels: List[str]):
     st.session_state["log_rows"] = []
-    st.session_state["avail_counts"] = {lb: {"image": 0, "video": 0, "webcam": 0} for lb in all_labels}
-    st.session_state["cam_run"] = False
+    st.session_state["avail_counts"] = {lb: {"image": 0, "video": 0, "camera": 0} for lb in all_labels}
 
 
 def log_add(source: str, rows: List[Dict]):
@@ -133,8 +154,8 @@ def shrink_rgb(img_rgb: np.ndarray, max_side: int) -> np.ndarray:
     if m <= max_side:
         return img_rgb
     scale = max_side / float(m)
-    new_w = int(w * scale)
-    new_h = int(h * scale)
+    new_w = max(1, int(w * scale))
+    new_h = max(1, int(h * scale))
     return cv2.resize(img_rgb, (new_w, new_h), interpolation=cv2.INTER_AREA)
 
 
@@ -147,7 +168,7 @@ def infer_image_array(
     max_det: int,
     keep_ids: Optional[List[int]] = None,
 ) -> Tuple[np.ndarray, List[Dict]]:
-    """Untuk FOTO/BATCH: input RGB -> output annotated RGB + rows"""
+    """Untuk FOTO/BATCH/CAMERA: input RGB -> output annotated RGB + rows"""
     img_bgr = cv2.cvtColor(img_rgb, cv2.COLOR_RGB2BGR)
 
     results = model.predict(
@@ -170,21 +191,24 @@ def infer_image_array(
             cid = int(b.cls.item())
             score = float(b.conf.item())
             x1, y1, x2, y2 = [float(x) for x in b.xyxy[0].tolist()]
-            rows.append({
-                "label": nm.get(cid, str(cid)),
-                "conf": round(score, 4),
-                "x1": round(x1, 1),
-                "y1": round(y1, 1),
-                "x2": round(x2, 1),
-                "y2": round(y2, 1),
-            })
+            rows.append(
+                {
+                    "label": nm.get(cid, str(cid)),
+                    "conf": round(score, 4),
+                    "x1": round(x1, 1),
+                    "y1": round(y1, 1),
+                    "x2": round(x2, 1),
+                    "y2": round(y2, 1),
+                }
+            )
     return annotated_rgb, rows
 
 
 # =========================
 # CHECKLIST RULES (OR PER SOURCE)
 # Foto: hijau jika >=1
-# Video/Webcam: hijau jika >= threshold
+# Video: hijau jika >= threshold
+# Camera (st.camera_input): hijau jika >=1 (atau bisa kamu set threshold)
 # OR antar sumber (cukup salah satu)
 # =========================
 def update_availability_image(labels: List[str]):
@@ -192,15 +216,20 @@ def update_availability_image(labels: List[str]):
         st.session_state["avail_counts"][lb]["image"] += 1
 
 
-def update_availability_stream(label: Optional[str], src: str, frame_idx: int, every_n_frames: int):
-    """Hitung cepat berbasis frame"""
+def update_availability_camera(labels: List[str]):
+    for lb in set(labels):
+        st.session_state["avail_counts"][lb]["camera"] += 1
+
+
+def update_availability_video(label: Optional[str], frame_idx: int, every_n_frames: int):
+    """Hitung cepat berbasis frame (video)."""
     if not label:
         return
     if every_n_frames <= 1:
-        st.session_state["avail_counts"][label][src] += 1
+        st.session_state["avail_counts"][label]["video"] += 1
         return
     if frame_idx % every_n_frames == 0:
-        st.session_state["avail_counts"][label][src] += 1
+        st.session_state["avail_counts"][label]["video"] += 1
 
 
 def render_availability_panel(all_labels: List[str], stream_threshold: int):
@@ -209,11 +238,11 @@ def render_availability_panel(all_labels: List[str], stream_threshold: int):
     for lb in all_labels:
         cimg = int(counts.get(lb, {}).get("image", 0))
         cvid = int(counts.get(lb, {}).get("video", 0))
-        ccam = int(counts.get(lb, {}).get("webcam", 0))
+        ccam = int(counts.get(lb, {}).get("camera", 0))
 
         ok_img = cimg >= 1
         ok_vid = cvid >= stream_threshold
-        ok_cam = ccam >= stream_threshold
+        ok_cam = ccam >= 1  # camera_input: minimal 1 capture yang mendeteksi label tsb
 
         is_green = ok_img or ok_vid or ok_cam
         is_yellow = (cimg + cvid + ccam) > 0 and not is_green
@@ -226,7 +255,7 @@ def render_availability_panel(all_labels: List[str], stream_threshold: int):
             if ok_vid:
                 sebab.append(f"video≥{stream_threshold}")
             if ok_cam:
-                sebab.append(f"webcam≥{stream_threshold}")
+                sebab.append("kamera≥1")
             trigger = " / ".join(sebab)
         elif is_yellow:
             status = "🟡 Terdeteksi"
@@ -235,14 +264,16 @@ def render_availability_panel(all_labels: List[str], stream_threshold: int):
             status = "⚪ Belum"
             trigger = "-"
 
-        rows.append({
-            "Label": lb,
-            "Foto": cimg,
-            "Video": cvid,
-            "Webcam": ccam,
-            "Status": status,
-            "Trigger": trigger,
-        })
+        rows.append(
+            {
+                "Label": lb,
+                "Foto": cimg,
+                "Video": cvid,
+                "Kamera": ccam,
+                "Status": status,
+                "Trigger": trigger,
+            }
+        )
 
     df = pd.DataFrame(rows)
 
@@ -254,7 +285,7 @@ def render_availability_panel(all_labels: List[str], stream_threshold: int):
         return ["background-color:#111827;color:#e5e7eb"] * len(row)
 
     st.markdown("### ✅ Checklist Ketersediaan (Hari Ini)")
-    st.caption("Hijau jika salah satu terpenuhi: foto≥1 ATAU video≥threshold ATAU webcam≥threshold (OR antar sumber).")
+    st.caption("Hijau jika salah satu terpenuhi: foto≥1 ATAU video≥threshold ATAU kamera≥1 (OR antar sumber).")
     st.dataframe(df.style.apply(style_row, axis=1), use_container_width=True, height=520)
 
     st.download_button(
@@ -348,9 +379,8 @@ keep_ids = to_keep_ids(model, keep_classes)
 
 st.sidebar.markdown("---")
 st.sidebar.subheader("Checklist Rules")
-stream_threshold = st.sidebar.slider("Threshold hijau (Video/Webcam)", 1, 30, 3, 1)
+stream_threshold = st.sidebar.slider("Threshold hijau (Video)", 1, 30, 3, 1)
 every_n_video = st.sidebar.slider("Video: tambah counter tiap N frame", 1, 30, 5, 1)
-every_n_webcam = st.sidebar.slider("Webcam: tambah counter tiap N frame", 1, 30, 5, 1)
 
 st.sidebar.markdown("---")
 st.sidebar.subheader("Foto Performance")
@@ -361,12 +391,6 @@ st.sidebar.markdown("---")
 local_save = st.sidebar.checkbox("Simpan output gambar ke folder lokal", value=True)
 outdir_local = st.sidebar.text_input("Folder output gambar", value=r"D:\absensi\hasil\prediksi")
 outdir_video = st.sidebar.text_input("Folder output video", value=r"D:\absensi\hasil")
-
-st.sidebar.markdown("---")
-st.sidebar.subheader("Webcam (OpenCV)")
-cam_index = st.sidebar.number_input("Camera index", 0, 10, 0, 1)
-stable_n = st.sidebar.slider("Stabilizer (vote N frames)", 1, 21, 9, 1)
-webcam_duration = st.sidebar.slider("Durasi run webcam (detik)", 3, 60, 15, 1)
 
 st.sidebar.markdown("---")
 if st.sidebar.button("🔄 Reset Semua (Checklist + Log)"):
@@ -382,12 +406,11 @@ with st.sidebar.expander("Lihat nama kelas model"):
 # =========================
 left, right = st.columns([3, 1], gap="large")
 
-# Placeholder checklist (akan dirender di AKHIR supaya foto langsung update)
 with right:
     checklist_placeholder = st.empty()
 
 with left:
-    tabs = st.tabs(["🖼️ Foto", "🗂️ Banyak Foto / ZIP", "🎞️ Video", "📷 Webcam", "🧾 Log & Export"])
+    tabs = st.tabs(["🖼️ Foto", "🗂️ Banyak Foto / ZIP", "🎞️ Video", "📷 Kamera (Browser)", "🧾 Log & Export"])
 
     # =========================
     # TAB 1: SINGLE IMAGE
@@ -399,8 +422,6 @@ with left:
         if up is not None:
             img = Image.open(up).convert("RGB")
             img_rgb = np.array(img)
-
-            # resize opsional biar cepat
             img_rgb = shrink_rgb(img_rgb, int(max_side))
 
             c1, c2 = st.columns(2)
@@ -455,7 +476,7 @@ with left:
         images: List[Tuple[str, np.ndarray]] = []
 
         if zip_up is not None:
-            zdata = zip_up.read()
+            zdata = zip_up.getvalue()
             with zipfile.ZipFile(io.BytesIO(zdata), "r") as z:
                 for name in z.namelist():
                     if name.lower().endswith((".jpg", ".jpeg", ".png")):
@@ -514,11 +535,11 @@ with left:
                     st.markdown("### Ringkasan label")
                     st.dataframe(
                         df.groupby("label")["conf"].agg(["count", "mean"]).sort_values("count", ascending=False),
-                        use_container_width=True
+                        use_container_width=True,
                     )
 
     # =========================
-    # TAB 3: VIDEO
+    # TAB 3: VIDEO (STILL OPENCV)
     # =========================
     with tabs[2]:
         st.subheader("🎞️ Deteksi Video (Upload)")
@@ -536,7 +557,7 @@ with left:
                 tmpdir.mkdir(parents=True, exist_ok=True)
 
                 in_path = tmpdir / vup.name
-                in_path.write_bytes(vup.read())
+                in_path.write_bytes(vup.getvalue())
 
                 cap = cv2.VideoCapture(str(in_path))
                 if not cap.isOpened():
@@ -562,13 +583,14 @@ with left:
                 writer = cv2.VideoWriter(str(out_path), fourcc, float(fps), (w, h))
                 if not writer.isOpened():
                     cap.release()
-                    st.error("VideoWriter gagal dibuka. Pilih AVI (XVID).")
+                    st.error("VideoWriter gagal dibuka. Coba pilih AVI (XVID).")
                     st.stop()
 
                 prog = st.progress(0)
                 status = st.empty()
 
                 hist: List[Optional[str]] = []
+                stable_n = 9  # stabilizer default
                 frame_idx = 0
 
                 try:
@@ -609,24 +631,34 @@ with left:
                         series = [x for x in hist if x is not None]
                         stable = max(set(series), key=series.count) if series else None
 
-                        update_availability_stream(stable, "video", frame_idx, every_n_video)
+                        update_availability_video(stable, frame_idx, every_n_video)
 
                         if stable:
                             cv2.putText(
-                                annotated_bgr, f"STABLE: {stable}",
-                                (12, 32), cv2.FONT_HERSHEY_SIMPLEX, 1.0,
-                                (0, 255, 0), 2, cv2.LINE_AA
+                                annotated_bgr,
+                                f"STABLE: {stable}",
+                                (12, 32),
+                                cv2.FONT_HERSHEY_SIMPLEX,
+                                1.0,
+                                (0, 255, 0),
+                                2,
+                                cv2.LINE_AA,
                             )
 
                         writer.write(annotated_bgr)
 
                         if bl:
-                            st.session_state["log_rows"].append({
-                                "source": f"video:{vup.name}@{frame_idx}",
-                                "label": bl[0],
-                                "conf": round(bl[1], 4),
-                                "x1": None, "y1": None, "x2": None, "y2": None,
-                            })
+                            st.session_state["log_rows"].append(
+                                {
+                                    "source": f"video:{vup.name}@{frame_idx}",
+                                    "label": bl[0],
+                                    "conf": round(bl[1], 4),
+                                    "x1": None,
+                                    "y1": None,
+                                    "x2": None,
+                                    "y2": None,
+                                }
+                            )
 
                         if total > 0:
                             prog.progress(min(frame_idx / total, 1.0))
@@ -648,93 +680,51 @@ with left:
                 )
 
     # =========================
-    # TAB 4: WEBCAM
+    # TAB 4: CAMERA INPUT (BROWSER)
     # =========================
     with tabs[3]:
-        st.subheader("📷 Webcam (OpenCV)")
+        st.subheader("📷 Kamera Browser (st.camera_input)")
+        st.caption("Mode ini kompatibel untuk Cloud. Ambil foto → langsung deteksi.")
 
-        c1, c2 = st.columns(2)
-        with c1:
-            if st.button("▶️ Start Webcam", type="primary"):
-                st.session_state["cam_run"] = True
-        with c2:
-            if st.button("⏹️ Stop Webcam"):
-                st.session_state["cam_run"] = False
+        shot = st.camera_input("Ambil foto dari kamera")
 
-        frame_box = st.empty()
-        info_box = st.empty()
+        if shot is not None:
+            img = Image.open(shot).convert("RGB")
+            img_rgb = np.array(img)
+            img_rgb = shrink_rgb(img_rgb, int(max_side))
 
-        if st.session_state["cam_run"]:
-            cap = cv2.VideoCapture(int(cam_index))
-            if not cap.isOpened():
-                st.error(f"Gagal membuka webcam index={cam_index}. Coba 0/1/2.")
-                st.session_state["cam_run"] = False
-            else:
-                t_end = time.time() + float(webcam_duration)
-                hist: List[Optional[str]] = []
-                frame_idx = 0
+            c1, c2 = st.columns(2)
+            with c1:
+                st.image(Image.fromarray(img_rgb), caption="Input (camera_input)", use_container_width=True)
 
-                while time.time() < t_end and st.session_state["cam_run"]:
-                    ok, frame = cap.read()
-                    if not ok:
-                        break
-                    frame_idx += 1
+            if st.button("▶️ Deteksi Foto Kamera", type="primary"):
+                annotated_rgb, rows = infer_image_array(model, img_rgb, conf, iou, imgsz, max_det, keep_ids)
 
-                    results = model.predict(
-                        source=frame,
-                        conf=conf,
-                        iou=iou,
-                        imgsz=imgsz,
-                        max_det=max_det,
-                        classes=keep_ids,
-                        verbose=False,
+                with c2:
+                    st.image(annotated_rgb, caption="Output", use_container_width=True)
+
+                ulabels = unique_labels(rows)
+                st.write("**Label (unik):**", ", ".join(ulabels) if ulabels else "-")
+
+                if rows:
+                    st.dataframe(pd.DataFrame(rows), use_container_width=True)
+                    log_add(source="camera_input", rows=rows)
+                    update_availability_camera(ulabels)
+
+                    if local_save:
+                        ensure_dir(outdir_local)
+                        out_path = Path(outdir_local) / f"pred_camera_{int(time.time())}.png"
+                        Image.fromarray(annotated_rgb).save(out_path)
+                        st.success(f"Tersimpan: {out_path}")
+
+                    st.download_button(
+                        "⬇️ Download hasil (PNG)",
+                        data=image_to_bytes(annotated_rgb, "PNG"),
+                        file_name=f"pred_camera_{int(time.time())}.png",
+                        mime="image/png",
                     )
-                    r = results[0]
-                    annotated_bgr = r.plot(conf=True, labels=True)
-
-                    rows: List[Dict] = []
-                    if r.boxes is not None and len(r.boxes) > 0:
-                        for b in r.boxes:
-                            cid = int(b.cls.item())
-                            score = float(b.conf.item())
-                            rows.append({"label": model.names.get(cid, str(cid)), "conf": round(score, 4)})
-
-                    bl = best_label(rows)
-                    lbl = bl[0] if bl else None
-                    bconf = bl[1] if bl else None
-
-                    hist.append(lbl)
-                    if len(hist) > stable_n:
-                        hist = hist[-stable_n:]
-                    series = [x for x in hist if x is not None]
-                    stable = max(set(series), key=series.count) if series else None
-
-                    update_availability_stream(stable, "webcam", frame_idx, every_n_webcam)
-
-                    if stable:
-                        cv2.putText(
-                            annotated_bgr, f"STABLE: {stable}",
-                            (12, 32), cv2.FONT_HERSHEY_SIMPLEX, 1.0,
-                            (0, 255, 0), 2, cv2.LINE_AA
-                        )
-
-                    ann_rgb = cv2.cvtColor(annotated_bgr, cv2.COLOR_BGR2RGB)
-                    frame_box.image(ann_rgb, channels="RGB", use_container_width=True)
-
-                    if lbl:
-                        info_box.info(f"best: {lbl} conf={bconf:.2f} | stable: {stable if stable else '-'}")
-                        st.session_state["log_rows"].append({
-                            "source": "webcam",
-                            "label": lbl,
-                            "conf": round(float(bconf), 4),
-                            "x1": None, "y1": None, "x2": None, "y2": None,
-                        })
-                    else:
-                        info_box.warning(f"no detections | stable: {stable if stable else '-'}")
-
-                cap.release()
-                st.session_state["cam_run"] = False
-                st.success("Webcam selesai (auto-stop).")
+                else:
+                    st.info("Tidak ada deteksi di atas threshold.")
 
     # =========================
     # TAB 5: LOG & EXPORT
@@ -751,7 +741,7 @@ with left:
             st.markdown("### Ringkasan label (log)")
             st.dataframe(
                 df.groupby("label")["conf"].agg(["count", "mean"]).sort_values("count", ascending=False),
-                use_container_width=True
+                use_container_width=True,
             )
 
             st.download_button(
@@ -765,11 +755,11 @@ with left:
                 st.session_state["log_rows"] = []
                 st.success("Log cleared.")
         else:
-            st.info("Log masih kosong. Jalankan deteksi dulu dari Foto/Video/Webcam.")
+            st.info("Log masih kosong. Jalankan deteksi dulu dari Foto/Video/Kamera.")
 
 
 # =========================
-# RENDER CHECKLIST DI AKHIR (FIX foto lambat update)
+# RENDER CHECKLIST DI AKHIR
 # =========================
 with checklist_placeholder.container():
     render_availability_panel(classes, stream_threshold)
