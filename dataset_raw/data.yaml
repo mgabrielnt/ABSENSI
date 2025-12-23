@@ -1,0 +1,27 @@
+names:
+- aca
+- adin
+- budi
+- dinal
+- face
+- faiq
+- farisa
+- ferro
+- gabriel
+- head
+- ical
+- nabila
+- paang
+- rama
+- rico
+- shinta
+nc: 16
+roboflow:
+  license: CC BY 4.0
+  project: my-first-project-sbky7
+  url: https://universe.roboflow.com/viskom-szwla/my-first-project-sbky7/dataset/1
+  version: 1
+  workspace: viskom-szwla
+test: ../test/images
+train: ../train/images
+val: ../valid/images
